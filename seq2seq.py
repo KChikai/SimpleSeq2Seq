@@ -51,31 +51,28 @@ class Decoder(chainer.Chain):
             fy=L.Linear(hidden_size, vocab_size),
         )
 
-    def __call__(self, y, c_pre, h_pre, h_enc):
+    def __call__(self, y, c_pre, h_pre, hs_enc):
         e = F.tanh(self.ye(y))
         c_tmp, h_tmp = F.lstm(c_pre, self.eh(e) + self.hh(h_pre))
         enable = chainer.Variable(chainer.Variable(y.data != -1).data.reshape(len(y), 1))
         c_next = F.where(enable, c_tmp, c_pre)
         h_next = F.where(enable, h_tmp, h_pre)
-        ct = self.calculate_alpha(h_next, h_enc)
-        f = self.wc(ct) + self.wh(h_next)
+        ct = self.calculate_alpha(h_next, hs_enc)
+        f = F.tanh(self.wc(ct) + self.wh(h_next))
         return self.fy(f), c_next, h_next
 
     @staticmethod
     def calculate_alpha(h, hs_enc):
         sum_value = Variable(xp.zeros((h.shape[0], 1), dtype=xp.float32))
+        products = []
         for h_enc in hs_enc:
-            sum_value += F.exp(F.batch_matmul(h, h_enc, transa=True)).data[:, :, 0]
+            inner_product = F.exp(F.batch_matmul(h, h_enc, transa=True)).data[:, :, 0]
+            products.append(inner_product)
+            sum_value += inner_product
         ct = Variable(xp.zeros((h.shape[0], h.shape[1]), dtype=xp.float32))
-        for h_enc in hs_enc:
-            alpha_i = F.exp(F.batch_matmul(h, h_enc, transa=True)).data[:, :, 0] / sum_value
+        for i, h_enc in enumerate(hs_enc):
+            alpha_i = products[i] / sum_value
             ct += alpha_i.data * h_enc.data
-            # print('batch', F.batch_matmul(h, h_enc, transa=True).shape)
-            # print('exp', F.exp(F.batch_matmul(h, h_enc, transa=True)).shape)
-            # print('sum', sum_value.shape)
-            # print('alpha', alpha_i.shape)
-            # print('h_enc', h_enc.shape)
-            # print('ct', ct.shape)
         return ct
 
 
