@@ -46,18 +46,37 @@ class Decoder(chainer.Chain):
             ye=L.EmbedID(vocab_size, embed_size, ignore_label=-1),
             eh=L.Linear(embed_size, 4 * hidden_size),
             hh=L.Linear(hidden_size, 4 * hidden_size),
-            hf=L.Linear(hidden_size, embed_size),
-            fy=L.Linear(embed_size, vocab_size),
+            wc=L.Linear(hidden_size, hidden_size),
+            wh=L.Linear(hidden_size, hidden_size),
+            fy=L.Linear(hidden_size, vocab_size),
         )
 
-    def __call__(self, y, c_pre, h_pre):
+    def __call__(self, y, c_pre, h_pre, h_enc):
         e = F.tanh(self.ye(y))
         c_tmp, h_tmp = F.lstm(c_pre, self.eh(e) + self.hh(h_pre))
         enable = chainer.Variable(chainer.Variable(y.data != -1).data.reshape(len(y), 1))
         c_next = F.where(enable, c_tmp, c_pre)
         h_next = F.where(enable, h_tmp, h_pre)
-        f = F.tanh(self.hf(h_next))
+        ct = self.calculate_alpha(h_next, h_enc)
+        f = self.wc(ct) + self.wh(h_next)
         return self.fy(f), c_next, h_next
+
+    @staticmethod
+    def calculate_alpha(h, hs_enc):
+        sum_value = Variable(xp.zeros((h.shape[0], 1), dtype=xp.float32))
+        for h_enc in hs_enc:
+            sum_value += F.exp(F.batch_matmul(h, h_enc, transa=True)).data[:, :, 0]
+        ct = Variable(xp.zeros((h.shape[0], h.shape[1]), dtype=xp.float32))
+        for h_enc in hs_enc:
+            alpha_i = F.exp(F.batch_matmul(h, h_enc, transa=True)).data[:, :, 0] / sum_value
+            ct += alpha_i.data * h_enc.data
+            # print('batch', F.batch_matmul(h, h_enc, transa=True).shape)
+            # print('exp', F.exp(F.batch_matmul(h, h_enc, transa=True)).shape)
+            # print('sum', sum_value.shape)
+            # print('alpha', alpha_i.shape)
+            # print('h_enc', h_enc.shape)
+            # print('ct', ct.shape)
+        return ct
 
 
 class Seq2Seq(chainer.Chain):
@@ -77,6 +96,7 @@ class Seq2Seq(chainer.Chain):
         self.batch_size = batch_size
         self.c_batch = Variable(xp.zeros((batch_size, self.hidden_num), dtype=xp.float32))  # cell Variable
         self.h_batch = Variable(xp.zeros((batch_size, self.hidden_num), dtype=xp.float32))  # hidden Variable
+        self.h_enc = []                                                                     # for calculating alpha
 
         super(Seq2Seq, self).__init__(
             enc=Encoder(vocab_size, feature_num, hidden_num, batch_size),       # encoder
@@ -92,6 +112,7 @@ class Seq2Seq(chainer.Chain):
         for batch_word in input_batch:
             batch_word = chainer.Variable(xp.array(batch_word, dtype=xp.int32))
             self.c_batch, self.h_batch = self.enc(batch_word, self.c_batch, self.h_batch, train=train)
+            self.h_enc.append(self.h_batch)
 
     def decode(self, predict_id, teacher_id, train):
         """
@@ -101,7 +122,7 @@ class Seq2Seq(chainer.Chain):
         :return: decoded embed vector
         """
         batch_word = chainer.Variable(xp.array(predict_id, dtype=xp.int32))
-        predict_mat, self.c_batch, self.h_batch = self.dec(batch_word, self.c_batch, self.h_batch)
+        predict_mat, self.c_batch, self.h_batch = self.dec(batch_word, self.c_batch, self.h_batch, self.h_enc)
         if train:
             t = xp.array(teacher_id, dtype=xp.int32)
             t = chainer.Variable(t)
@@ -112,6 +133,7 @@ class Seq2Seq(chainer.Chain):
     def initialize(self):
         self.c_batch = Variable(xp.zeros((self.batch_size, self.hidden_num), dtype=xp.float32))
         self.h_batch = Variable(xp.zeros((self.batch_size, self.hidden_num), dtype=xp.float32))
+        self.h_enc.clear()
 
     def one_encode(self, src_text, train):
         """
